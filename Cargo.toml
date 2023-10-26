@@ -1,0 +1,29 @@
+[package]
+name = "switchconf"
+version = "0.0.0"
+edition = "2021"
+license = "MPL-2.0"
+
+[features]
+default = ['vendored-openssl']
+vendored-openssl = ['openssl/vendored']
+
+[dependencies]
+anyhow = "1.0.75"
+async-trait = "0.1.73"
+bytes = "1.5.0"
+env_logger = "0.10.0"
+futures = "0.3.28"
+hiercmd = { git = "https://github.com/jclulow/hiercmd", version = "0.1.0" }
+russh = { version = "0.39.0", features = ["openssl"] }
+russh-keys = { version = "0.38.0", features = ["openssl"] }
+serde = { version = "1.0.189", features = ["derive"] }
+tokio = { version = "1.33.0", features = ["full"] }
+toml = "0.8.2"
+
+#
+# I believe it is necessary to pull this in here, so that we can demand the
+# static linking of the vendored OpenSSL.  We don't use it directly, but the
+# same version will then be used by reqwest.
+#
+openssl = { version = "0.10", optional = true }
