@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateFile {
     cdp: Option<TemplateCdp>,
     lldp: Option<TemplateLldp>,
@@ -23,17 +24,34 @@ pub struct TemplateFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateInterface {
     gigabit: Option<BTreeMap<String, TemplateGigabit>>,
     tengigabit: Option<BTreeMap<String, TemplateGigabit>>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateInterfaceLldp {
+    transmit: Option<bool>,
+}
+
+impl TemplateInterfaceLldp {
+    fn transmit(&self) -> bool {
+        self.transmit.unwrap_or(true)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateGigabit {
     enable: Option<bool>,
     desc: Option<String>,
     vlan: Option<String>,
     mode: Option<String>,
+    power: Option<bool>,
+    lldp: Option<TemplateInterfaceLldp>,
+    stp: Option<bool>,
 }
 
 impl TemplateGigabit {
@@ -52,9 +70,18 @@ impl TemplateGigabit {
     fn vlan_name(&self) -> &str {
         self.vlan.as_deref().unwrap_or("default")
     }
+
+    fn power(&self) -> bool {
+        self.power.unwrap_or(true)
+    }
+
+    fn spanning_tree(&self) -> bool {
+        self.stp.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateVlan {
     enable: Option<bool>,
     id: u16,
@@ -69,50 +96,59 @@ impl TemplateVlan {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateCdp {
     enable: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateLldp {
     enable: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateBonjour {
     enable: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSnmpServer {
     enable: bool,
     community: Option<HashMap<String, TemplateSnmpCommunity>>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSnmpCommunity {
     readonly: bool,
     view: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSshServer {
     enable: bool,
     auth: Option<TemplateSshServerAuth>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSshServerAuth {
     pubkey: Option<TemplateSshServerPubkey>,
     password: Option<TemplateSshServerPassword>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSshServerPassword {
     enable: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSshServerPubkey {
     enable: bool,
     auto_login: Option<bool>,
@@ -129,6 +165,7 @@ impl TemplateSshServerPubkey {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateUser {
     privilege: u16,
     password: String,
@@ -136,6 +173,7 @@ pub struct TemplateUser {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateLogging {
     console: bool,
 }
@@ -525,7 +563,7 @@ impl TemplateFile {
             self.interface.as_ref().and_then(|ifs| ifs.gigabit.as_ref())
         {
             out.extend(
-                self.configure_interfaces(config, "gi", gi)?.into_iter(),
+                self.configure_interfaces(config, "gi", gi, false)?.into_iter(),
             );
         }
 
@@ -533,7 +571,7 @@ impl TemplateFile {
             self.interface.as_ref().and_then(|ifs| ifs.tengigabit.as_ref())
         {
             out.extend(
-                self.configure_interfaces(config, "te", te)?.into_iter(),
+                self.configure_interfaces(config, "te", te, true)?.into_iter(),
             );
         }
 
@@ -545,6 +583,7 @@ impl TemplateFile {
         config: &Config,
         pfx: &str,
         ifaces: &BTreeMap<String, TemplateGigabit>,
+        tengig: bool,
     ) -> Result<Vec<String>> {
         let mut out = Vec::new();
 
@@ -558,9 +597,11 @@ impl TemplateFile {
             let n: u16 = n.parse().unwrap();
 
             let def;
-            let ext = if let Some(ext) =
+            let ext = if let Some(ext) = if tengig {
+                config.interfaces.get(&Interface::TenGigabit(n))
+            } else {
                 config.interfaces.get(&Interface::Gigabit(n))
-            {
+            } {
                 ext
             } else {
                 def = Default::default();
@@ -656,6 +697,23 @@ impl TemplateFile {
                 }
             }
 
+            let want_lldp_transmit =
+                gi.lldp.as_ref().map(|lldp| lldp.transmit()).unwrap_or(true);
+
+            if want_lldp_transmit != ext.lldp.transmit {
+                sout.push(format!(
+                    "{}lldp transmit",
+                    if !want_lldp_transmit { "no " } else { "" }
+                ));
+            }
+
+            if gi.spanning_tree() != ext.spanning_tree.enable {
+                sout.push(format!(
+                    "{}spanning-tree disable",
+                    if gi.spanning_tree() { "no " } else { "" },
+                ));
+            }
+
             /*
              * We do not presently configure IP addresses directly on any
              * (ten)gigabit interfaces.
@@ -666,6 +724,19 @@ impl TemplateFile {
 
             if gi.enable() && ext.shutdown {
                 sout.push("no shutdown".into());
+            }
+
+            /*
+             * Enable or disable power-over-ethernet for this port.
+             */
+            if gi.power() {
+                if ext.power.inline != PowerInline::Auto {
+                    sout.push("power inline auto".into());
+                }
+            } else {
+                if ext.power.inline != PowerInline::Never {
+                    sout.push("power inline never".into());
+                }
             }
 
             if !sout.is_empty() {

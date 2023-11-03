@@ -37,6 +37,27 @@ pub enum SwitchPortMode {
     Trunk,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InterfaceSpanningTree {
+    pub enable: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InterfaceLldp {
+    pub transmit: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Power {
+    pub inline: PowerInline,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PowerInline {
+    Auto,
+    Never,
+}
+
 impl std::fmt::Display for SwitchPortMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -60,6 +81,9 @@ pub struct InterfaceConfig {
     pub name: Option<String>,
     pub description: Option<String>,
     pub dhcp: bool,
+    pub power: Power,
+    pub spanning_tree: InterfaceSpanningTree,
+    pub lldp: InterfaceLldp,
 }
 
 impl Default for InterfaceConfig {
@@ -73,6 +97,9 @@ impl Default for InterfaceConfig {
             name: None,
             description: None,
             dhcp: false,
+            power: Power { inline: PowerInline::Auto },
+            spanning_tree: InterfaceSpanningTree { enable: true },
+            lldp: InterfaceLldp { transmit: true },
         }
     }
 }
@@ -670,7 +697,9 @@ impl Parser {
             State::Rest
             | State::Header
             | State::SsdControl
-            | State::UnitTypeControl => panic!("unexpected"),
+            | State::UnitTypeControl => {
+                panic!("unexpected")
+            }
             State::General => {
                 match ww.get(0).map(|s| s.as_str()) {
                     Some("cdp") => {
@@ -974,16 +1003,34 @@ impl Parser {
                                     })?;
                             }
                             Some("allowed") => {
-                                if ww.len() != 5 || ww[3] != "vlan" {
+                                if ww.len() == 5 && ww[3] == "vlan" {
+                                    ifc.trunk_allowed_vlans =
+                                        Some(explode_id_list(&parse_id_list(
+                                            &ww[4],
+                                        )?));
+                                } else if ww.len() == 6
+                                    && ww[3] == "vlan"
+                                    && ww[4] == "add"
+                                {
+                                    if ifc.trunk_allowed_vlans.is_none() {
+                                        ifc.trunk_allowed_vlans =
+                                            Some(Default::default());
+                                    }
+                                    ifc.trunk_allowed_vlans
+                                        .as_mut()
+                                        .unwrap()
+                                        .extend(
+                                            explode_id_list(&parse_id_list(
+                                                &ww[5],
+                                            )?)
+                                            .into_iter(),
+                                        );
+                                } else {
                                     bail!(
                                         "unexpected interface \
                                         directive: {ww:?}"
                                     );
                                 }
-
-                                ifc.trunk_allowed_vlans = Some(
-                                    explode_id_list(&parse_id_list(&ww[4])?),
-                                );
                             }
                             Some(_) | None => {
                                 bail!(
@@ -1034,8 +1081,55 @@ impl Parser {
                         self.commit_interface()?;
                         self.state = State::General;
                     }
+                    Some("power") => match ww.get(1).map(|s| s.as_str()) {
+                        Some("inline") => {
+                            if no {
+                                bail!("power: {no:?} {ww:#?}");
+                            }
+
+                            ifc.power.inline =
+                                match ww.get(2).map(|s| s.as_str()) {
+                                    Some("never") => PowerInline::Never,
+                                    Some("auto") => PowerInline::Auto,
+                                    _ => bail!("power: {no:?} {ww:#?}"),
+                                };
+
+                            if ww.get(3).is_some() {
+                                bail!("power: {no:?} {ww:#?}");
+                            }
+                        }
+                        _ => bail!("power: {no:?} {ww:#?}"),
+                    },
+                    Some("lldp") => {
+                        match ww.get(1).map(|s| s.as_str()) {
+                            Some("transmit") => {
+                                ifc.lldp.transmit = !no;
+                            }
+                            _ => bail!("lldp: {no:?} {ww:#?}"),
+                        }
+
+                        if ww.get(2).is_some() {
+                            bail!("lldp: {no:?} {ww:#?}");
+                        }
+                    }
+                    Some("spanning-tree") => {
+                        if no {
+                            bail!("spanning-tree: {no:?} {ww:#?}");
+                        }
+
+                        match ww.get(1).map(|s| s.as_str()) {
+                            Some("disable") => {
+                                ifc.spanning_tree.enable = no;
+                            }
+                            _ => bail!("spanning-tree: {no:?} {ww:#?}"),
+                        }
+
+                        if ww.get(2).is_some() {
+                            bail!("spanning-tree: {no:?} {ww:#?}");
+                        }
+                    }
                     Some(_) | None => {
-                        bail!("unexpected line structure {no:?} {ww:#?}")
+                        bail!("interface: unexpected structure {no:?} {ww:#?}")
                     }
                 }
             }
