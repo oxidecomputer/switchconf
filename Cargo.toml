@@ -15,7 +15,7 @@ bytes = "1.5.0"
 env_logger = "0.10.0"
 futures = "0.3.28"
 hiercmd = { git = "https://github.com/jclulow/hiercmd", version = "0.1.0" }
-russh = { version = "0.39.0", features = ["openssl"] }
+russh = { version = "0.40.2", features = ["openssl"] }
 russh-keys = { version = "0.38.0", features = ["openssl"] }
 serde = { version = "1.0.189", features = ["derive"] }
 tokio = { version = "1.33.0", features = ["full"] }
