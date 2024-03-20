@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2024 Oxide Computer Company
  */
 
 use std::{collections::HashMap, ops::RangeBounds};
@@ -72,6 +72,25 @@ impl std::fmt::Display for SwitchPortMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct SyslogConfig {
+    pub host: Option<String>,
+    pub port: String,
+    pub facility: String,
+    pub severity: String,
+}
+
+impl Default for SyslogConfig {
+    fn default() -> Self {
+        SyslogConfig {
+            host: None,
+            port: "514".into(),
+            facility: "local7".into(),
+            severity: "debugging".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct InterfaceConfig {
     pub shutdown: bool,
     pub mode: SwitchPortMode,
@@ -129,6 +148,7 @@ impl From<Parser> for Config {
             lldp,
             hostname,
             logging_console,
+            logging_syslog,
             users,
             bonjour,
             snmp_server,
@@ -150,6 +170,7 @@ impl From<Parser> for Config {
             lldp,
             hostname,
             logging_console,
+            logging_syslog,
             users,
             bonjour,
             snmp_server,
@@ -239,6 +260,7 @@ struct Parser {
     lldp: bool,
     hostname: String,
     logging_console: bool,
+    logging_syslog: SyslogConfig,
     users: BTreeMap<String, UserConfig>,
     snmp_server: SnmpServer,
     ssh_server: SshServer,
@@ -265,6 +287,7 @@ impl Default for Parser {
             lldp: true,
             hostname: "".into(),
             logging_console: true,
+            logging_syslog: Default::default(),
             users: Default::default(),
             bonjour: Bonjour { enable: true, vlans: [1].into_iter().collect() },
             snmp_server: SnmpServer {
@@ -483,6 +506,59 @@ impl Parser {
             .insert(username, UserConfig { privilege, password_encrypted });
 
         Ok(())
+    }
+
+    fn line_logging(&mut self, no: bool, ww: &Vec<String>) -> Result<()> {
+        match ww.get(1).map(|s| s.as_str()) {
+            Some("console") => {
+                if ww.get(2).is_some() {
+                    bail!("{no:?} {ww:?}");
+                }
+
+                self.logging_console = !no;
+                return Ok(());
+            }
+            Some("host") => {
+                let Some(ip) = ww.get(2) else {
+                    bail!("logging: {no:?} {ww:?}");
+                };
+
+                self.logging_syslog = Default::default();
+                self.logging_syslog.host = Some(ip.to_string());
+
+                let mut wi = ww.iter().skip(3);
+                loop {
+                    match wi.next().map(String::as_str) {
+                        Some("port") => {
+                            if let Some(port) = wi.next() {
+                                self.logging_syslog.port = port.into();
+                            } else {
+                                bail!("logging: {no:?} {ww:?}");
+                            }
+                        }
+                        Some("severity") => {
+                            if let Some(sev) = wi.next() {
+                                self.logging_syslog.severity = sev.into();
+                            } else {
+                                bail!("logging: {no:?} {ww:?}");
+                            }
+                        }
+                        Some("facility") => {
+                            if let Some(fac) = wi.next() {
+                                self.logging_syslog.facility = fac.into();
+                            } else {
+                                bail!("logging: {no:?} {ww:?}");
+                            }
+                        }
+                        Some(_) => bail!("logging: {no:?} {ww:?}"),
+                        None => return Ok(()),
+                    }
+                }
+            }
+            _ => {
+                bail!("logging: {no:?} {ww:?}");
+            }
+        }
     }
 
     fn line_snmp_server(&mut self, no: bool, ww: &Vec<String>) -> Result<()> {
@@ -783,11 +859,7 @@ impl Parser {
                         self.hostname = ww[1].to_string();
                     }
                     Some("logging") => {
-                        if ww.len() != 2 || ww[1] != "console" {
-                            bail!("logging: {no:?} {ww:?}");
-                        }
-
-                        self.logging_console = !no;
+                        return self.line_logging(no, &ww);
                     }
                     Some("username") => {
                         return self.line_username(no, &ww);
@@ -1153,6 +1225,7 @@ pub struct Config {
     pub lldp: bool,
     pub hostname: String,
     pub logging_console: bool,
+    pub logging_syslog: SyslogConfig,
     pub users: BTreeMap<String, UserConfig>,
     pub bonjour: Bonjour,
     pub snmp_server: SnmpServer,
@@ -1321,6 +1394,7 @@ mod test {
         "bonjour interface range vlan 1",
         "hostname periwinkle",
         "no logging console",
+        "logging host 172.20.3.63 port 1514 severity debugging",
         "username root password encrypted \
             $99$RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR\
             RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR \

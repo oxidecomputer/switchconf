@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2024 Oxide Computer Company
  */
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -176,6 +176,16 @@ pub struct TemplateUser {
 #[serde(deny_unknown_fields)]
 pub struct TemplateLogging {
     console: bool,
+    syslog: Option<TemplateLoggingSyslog>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateLoggingSyslog {
+    host: String,
+    port: Option<u16>,
+    facility: Option<String>,
+    severity: Option<String>,
 }
 
 impl TemplateFile {
@@ -196,6 +206,46 @@ impl TemplateFile {
                 cmd.push("logging console");
 
                 out.push(cmd.join(" "));
+            }
+
+            if let Some(syslog) = &logging.syslog {
+                let mut update = false;
+
+                if Some(&syslog.host) != config.logging_syslog.host.as_ref()
+                    && config.logging_syslog.host.is_some()
+                {
+                    out.push(format!("no logging host {}", syslog.host));
+                    update = true;
+                }
+
+                let sport = syslog.port.unwrap_or(514).to_string();
+                let sfac = syslog.facility.as_deref().unwrap_or("local7");
+                let ssev = syslog.severity.as_deref().unwrap_or("debugging");
+
+                if sport != config.logging_syslog.port
+                    || sfac != config.logging_syslog.facility.as_str()
+                    || ssev != config.logging_syslog.severity.as_str()
+                {
+                    update = true;
+                }
+
+                if update {
+                    let mut cmd = Vec::new();
+                    cmd.push("logging host");
+                    cmd.push(syslog.host.as_str());
+                    cmd.push("port");
+                    cmd.push(&sport);
+                    cmd.push("facility");
+                    cmd.push(sfac);
+                    cmd.push("severity");
+                    cmd.push(ssev);
+
+                    out.push(cmd.join(" "));
+                }
+            } else {
+                if let Some(host) = &config.logging_syslog.host {
+                    out.push(format!("no logging host {host}"));
+                }
             }
         }
 
