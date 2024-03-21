@@ -244,6 +244,24 @@ async fn dump_config(s: &Stuff, name: &str) -> Result<String> {
     Ok(swc.exec("show running-config").await?)
 }
 
+async fn do_macs(mut l: Level<Stuff>) -> Result<()> {
+    l.usage_args(Some("SWITCH..."));
+
+    let a = args!(l);
+    if a.args().is_empty() {
+        bad_args!(l, "specify a switch to dump");
+    }
+
+    for name in a.args() {
+        let swc = SwitchClient::new(l.context(), name).await?;
+
+        println!("{}", swc.exec("show mac address-table").await?);
+        println!();
+    }
+
+    Ok(())
+}
+
 async fn do_dump(mut l: Level<Stuff>) -> Result<()> {
     l.usage_args(Some("SWITCH..."));
     l.optopt("o", "", "output config to file", "FILE");
@@ -279,6 +297,7 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
 
     l.reqopt("A", "", "apply a template file", "TEMPLATE");
     l.optflag("n", "", "dry run only");
+    l.optflag("v", "", "verbose output");
     l.optflag("p", "", "make configuration persistent");
 
     let a = args!(l);
@@ -288,6 +307,7 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
 
     let dryrun = a.opts().opt_present("n");
     let persist = a.opts().opt_present("p");
+    let verbose = a.opts().opt_present("v");
 
     let tpl = template::load(&a.opts().opt_str("A").unwrap())?;
 
@@ -299,12 +319,17 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
             raw.split('\n').collect::<Vec<_>>().as_slice(),
         )?;
 
-        println!("{name:?} CONFIG:");
-        println!("{cfg:#?}");
+        if verbose {
+            println!("{name:?} CONFIG:");
+            println!("{cfg:#?}");
+        }
         println!();
 
         let cmds = tpl.apply(&cfg)?;
         if !cmds.is_empty() {
+            if dryrun {
+                print!("would run these ");
+            }
             println!("update commands:");
             for cmd in &cmds {
                 println!("    {cmd}");
@@ -397,6 +422,7 @@ async fn main() -> Result<()> {
     l.cmd("dump", "dump configuration files from switches", cmd!(do_dump))?;
     l.cmd("parse", "parse a config file", cmd!(do_parse))?;
     l.cmd("apply", "apply a template to a switch", cmd!(do_apply))?;
+    l.cmd("macs", "dump MAC address table", cmd!(do_macs))?;
 
     l.context_mut().config = Some(config::load()?);
 
