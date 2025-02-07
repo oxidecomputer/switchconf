@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 use std::time::Duration;
@@ -15,6 +15,7 @@ mod config;
 mod parse;
 mod template;
 mod terminal;
+mod vlan;
 
 #[derive(Default)]
 struct Stuff {
@@ -233,7 +234,6 @@ impl client::Handler for SwitchClientInner {
         self,
         _server_public_key: &key::PublicKey,
     ) -> Result<(Self, bool), Self::Error> {
-        //println!("HANDLER: check_server_key: {:?}", server_public_key);
         Ok((self, true))
     }
 }
@@ -296,6 +296,7 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
     l.usage_args(Some("SWITCH..."));
 
     l.reqopt("A", "", "apply a template file", "TEMPLATE");
+    l.optopt("V", "", "use VLAN database file", "VLAN_DB");
     l.optflag("n", "", "dry run only");
     l.optflag("v", "", "verbose output");
     l.optflag("p", "", "make configuration persistent");
@@ -309,7 +310,13 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
     let persist = a.opts().opt_present("p");
     let verbose = a.opts().opt_present("v");
 
-    let tpl = template::load(&a.opts().opt_str("A").unwrap())?;
+    let vldb = if let Some(vlp) = a.opts().opt_str("V") {
+        vlan::VlanDatabase::load(&vlp)?
+    } else {
+        vlan::VlanDatabase::default()
+    };
+
+    let tpl = template::load(&a.opts().opt_str("A").unwrap(), &vldb)?;
 
     for name in a.args() {
         let swc = SwitchClient::new(l.context(), name).await?;
@@ -325,7 +332,7 @@ async fn do_apply(mut l: Level<Stuff>) -> Result<()> {
         }
         println!();
 
-        let cmds = tpl.apply(&cfg)?;
+        let cmds = tpl.apply(&cfg, &vldb)?;
         if !cmds.is_empty() {
             if dryrun {
                 print!("would run these ");
@@ -374,14 +381,21 @@ async fn do_parse(mut l: Level<Stuff>) -> Result<()> {
         "apply a template file and generate commands",
         "TEMPLATE",
     );
+    l.optopt("V", "", "use VLAN database file", "VLAN_DB");
 
     let a = args!(l);
     if a.args().is_empty() {
         bad_args!(l, "specify a file to parse");
     }
 
+    let vldb = if let Some(vlp) = a.opts().opt_str("V") {
+        vlan::VlanDatabase::load(&vlp)?
+    } else {
+        vlan::VlanDatabase::default()
+    };
+
     let tpl = if let Some(tp) = a.opts().opt_str("A") {
-        Some(template::load(&tp)?)
+        Some(template::load(&tp, &vldb)?)
     } else {
         None
     };
@@ -397,7 +411,7 @@ async fn do_parse(mut l: Level<Stuff>) -> Result<()> {
         println!();
 
         if let Some(tpl) = &tpl {
-            let cmds = tpl.apply(&cfg)?;
+            let cmds = tpl.apply(&cfg, &vldb)?;
             if !cmds.is_empty() {
                 println!("update commands:");
                 for cmd in &cmds {

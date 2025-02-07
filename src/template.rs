@@ -1,10 +1,13 @@
 /*
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::parse::*;
+use crate::{
+    parse::*,
+    vlan::{TemplateVlanAndId, VlanDatabase},
+};
 
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
@@ -80,11 +83,10 @@ impl TemplateGigabit {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateVlan {
     enable: Option<bool>,
-    id: u16,
     #[serde(default)]
     dhcp: bool,
 }
@@ -189,8 +191,27 @@ pub struct TemplateLoggingSyslog {
 }
 
 impl TemplateFile {
-    pub fn apply(&self, config: &Config) -> Result<Vec<String>> {
+    /**
+     * Before we look too hard at the configuration, we need to assemble a view
+     * of VLANs by combining: the directives in the template, which use symbolic
+     * VLAN names; and our VLAN database, which maps names to ID numbers.
+     */
+    fn reconcile_vlans(
+        &self,
+        vldb: &VlanDatabase,
+    ) -> Result<BTreeMap<String, TemplateVlanAndId>> {
+        let mut _empty = Default::default();
+        let vlans = self.vlan.as_ref().unwrap_or_else(|| &_empty);
+        vldb.reconcile(vlans)
+    }
+
+    pub fn apply(
+        &self,
+        config: &Config,
+        vldb: &VlanDatabase,
+    ) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
+        let vlans = self.reconcile_vlans(vldb)?;
 
         /*
          * If we don't deal with console logging first, the switch client may be
@@ -504,7 +525,7 @@ impl TemplateFile {
             out.push("macro auto disabled".into());
         }
 
-        if let Some(vlans) = &self.vlan {
+        {
             /*
              * First, determine if there are any VLANs that we need to tear
              * down.
@@ -546,7 +567,7 @@ impl TemplateFile {
              * Now that the VLAN database has been populated, check the rest of
              * the per-VLAN configuration.
              */
-            for (name, vlan) in vlans {
+            for (name, vlan) in vlans.iter() {
                 let mut fix_name = false;
                 let mut fix_dhcp = false;
                 let mut fix_shutdown = false;
@@ -566,18 +587,18 @@ impl TemplateFile {
                         fix_name = true;
                     }
 
-                    if ext.dhcp != vlan.dhcp {
+                    if ext.dhcp != vlan.t.dhcp {
                         fix_dhcp = true;
                     }
 
-                    if vlan.enable() == ext.shutdown {
+                    if vlan.t.enable() == ext.shutdown {
                         fix_shutdown = true;
                     }
                 } else {
                     if vlan.id != 1 {
                         fix_name = true;
                     }
-                    if !vlan.enable() {
+                    if !vlan.t.enable() {
                         fix_shutdown = true;
                     }
                     fix_dhcp = true;
@@ -594,13 +615,13 @@ impl TemplateFile {
                     }
                     if fix_dhcp {
                         let mut s =
-                            if vlan.dhcp { "" } else { "no " }.to_string();
+                            if vlan.t.dhcp { "" } else { "no " }.to_string();
                         s.push_str("ip address dhcp");
                         out.push(s);
                     }
                     if fix_shutdown {
-                        let mut s =
-                            if vlan.enable() { "" } else { "no " }.to_string();
+                        let mut s = if vlan.t.enable() { "" } else { "no " }
+                            .to_string();
                         s.push_str("shutdown");
                         out.push(s);
                     }
@@ -613,7 +634,8 @@ impl TemplateFile {
             self.interface.as_ref().and_then(|ifs| ifs.gigabit.as_ref())
         {
             out.extend(
-                self.configure_interfaces(config, "gi", gi, false)?.into_iter(),
+                self.configure_interfaces(config, "gi", gi, false, &vlans)?
+                    .into_iter(),
             );
         }
 
@@ -621,7 +643,8 @@ impl TemplateFile {
             self.interface.as_ref().and_then(|ifs| ifs.tengigabit.as_ref())
         {
             out.extend(
-                self.configure_interfaces(config, "te", te, true)?.into_iter(),
+                self.configure_interfaces(config, "te", te, true, &vlans)?
+                    .into_iter(),
             );
         }
 
@@ -634,6 +657,7 @@ impl TemplateFile {
         pfx: &str,
         ifaces: &BTreeMap<String, TemplateGigabit>,
         tengig: bool,
+        vlans: &BTreeMap<String, TemplateVlanAndId>,
     ) -> Result<Vec<String>> {
         let mut out = Vec::new();
 
@@ -658,7 +682,7 @@ impl TemplateFile {
                 &def
             };
 
-            let tv = self.vlan.as_ref().unwrap().get(gi.vlan_name()).unwrap();
+            let tv = vlans.get(gi.vlan_name()).unwrap();
             let gimode = gi.mode()?;
 
             if !gi.enable() && !ext.shutdown {
@@ -696,13 +720,8 @@ impl TemplateFile {
                      * the entire fabric, but in future we will want to be
                      * able to configure the trunk allow list.
                      */
-                    let all_vlans = self
-                        .vlan
-                        .as_ref()
-                        .map(|vl| {
-                            vl.values().map(|tv| tv.id).collect::<BTreeSet<_>>()
-                        })
-                        .unwrap_or_default();
+                    let all_vlans =
+                        vlans.iter().map(|vl| vl.1.id).collect::<BTreeSet<_>>();
 
                     let set = if let Some(tav) = &ext.trunk_allowed_vlans {
                         tav != &all_vlans
@@ -806,7 +825,7 @@ pub fn check_interfaces(
     pfx: &str,
     ifaces: &BTreeMap<String, TemplateGigabit>,
     max: u16,
-    t: &TemplateFile,
+    vlans: &BTreeMap<String, TemplateVlanAndId>,
 ) -> Result<()> {
     for (n, gi) in ifaces {
         /*
@@ -825,12 +844,7 @@ pub fn check_interfaces(
         gi.mode()?;
 
         if let Some(vlan) = gi.vlan.as_deref() {
-            if !t
-                .vlan
-                .as_ref()
-                .map(|vlans| vlans.contains_key(vlan))
-                .unwrap_or(false)
-            {
+            if !vlans.contains_key(vlan) {
                 bail!("{pfx}{n}: template does not include VLAN {vlan:?}");
             }
         }
@@ -839,32 +853,10 @@ pub fn check_interfaces(
     Ok(())
 }
 
-pub fn load(name: &str) -> Result<TemplateFile> {
+pub fn load(name: &str, vldb: &VlanDatabase) -> Result<TemplateFile> {
     let f = std::fs::read_to_string(name)?;
     let t: TemplateFile = toml::from_str(&f)?;
-
-    /*
-     * Perform some consistency checks on interfaces and VLANs.
-     */
-    if let Some(vlans) = &t.vlan {
-        let mut vids = HashSet::new();
-
-        if !vlans.contains_key("default") {
-            bail!("default VLAN must be specified");
-        }
-
-        for (n, vlan) in vlans.iter() {
-            if !vids.insert(vlan.id) {
-                bail!("VLAN id {} appears to be a duplicate", vlan.id);
-            }
-
-            if (n == "default" && vlan.id != 1)
-                || (n != "default" && vlan.id == 1)
-            {
-                bail!("one may only use the name \"default\" for VLAN 1");
-            }
-        }
-    }
+    let vlans = t.reconcile_vlans(vldb)?;
 
     if let Some(iface) = &t.interface {
         if let Some(gi) = &iface.gigabit {
@@ -873,7 +865,7 @@ pub fn load(name: &str) -> Result<TemplateFile> {
              * ports, but none of the ones we care about have more than
              * 64.
              */
-            check_interfaces("gi", gi, 64, &t)?;
+            check_interfaces("gi", gi, 64, &vlans)?;
         }
         if let Some(te) = &iface.tengigabit {
             /*
@@ -881,7 +873,7 @@ pub fn load(name: &str) -> Result<TemplateFile> {
              * ports, but none of the ones we care about have more than
              * 64.
              */
-            check_interfaces("te", te, 4, &t)?;
+            check_interfaces("te", te, 4, &vlans)?;
         }
     }
 
